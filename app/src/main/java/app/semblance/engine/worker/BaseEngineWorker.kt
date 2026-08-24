@@ -2,9 +2,11 @@ package app.semblance.engine.worker
 
 import android.app.Service
 import android.content.Intent
+import android.content.MutableContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
+import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,12 +17,15 @@ import android.os.RemoteCallbackList
 import android.os.RemoteException
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import app.semblance.BuildConfig
 import app.semblance.engine.ipc.IEngineCallback
 import app.semblance.engine.ipc.IEngineWorker
 import app.semblance.engine.model.ActionJson
@@ -42,7 +47,14 @@ abstract class BaseEngineWorker : Service() {
 
     override fun onDestroy() {
         mainHandler.post {
-            webView?.destroy()
+            val view = webView
+            if (view != null) {
+                WorkerWebViewBridge.clear(view, applicationContext)
+                view.stopLoading()
+                view.loadUrl("about:blank")
+                view.removeAllViews()
+                view.destroy()
+            }
             webView = null
         }
         callbacks.kill()
@@ -51,12 +63,15 @@ abstract class BaseEngineWorker : Service() {
 
     private fun applyViewport(w: Int, h: Int) {
         mainHandler.post {
-            val wv = webView ?: return@post
-            wv.measure(
-                View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+            val view = webView ?: return@post
+            if (WorkerWebViewBridge.isAttached(view)) return@post
+            val width = w.coerceAtLeast(1)
+            val height = h.coerceAtLeast(1)
+            view.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
             )
-            wv.layout(0, 0, w, h)
+            view.layout(0, 0, width, height)
         }
     }
 
@@ -86,47 +101,116 @@ abstract class BaseEngineWorker : Service() {
 
                 currentProfileId = profileId
 
+                val screenW = profileData.getInt("screen_width", 1080).coerceAtLeast(1)
+                val screenH = profileData.getInt("screen_height", 2400).coerceAtLeast(1)
+
                 if (webView == null) {
-                    webView = WebView(this@BaseEngineWorker).apply {
-                        // P1B HARDENING SETTINGS
+                    val wrapper = WorkerWebViewBridge.newWebViewContext(applicationContext)
+                    webView = WebView(wrapper).apply {
                         settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
                             databaseEnabled = true
                             useWideViewPort = true
                             loadWithOverviewMode = true
-                            setSupportZoom(false)
-                            builtInZoomControls = false
                             mediaPlaybackRequiresUserGesture = false
                             cacheMode = WebSettings.LOAD_DEFAULT
+                            setSupportZoom(true)
+                            builtInZoomControls = true
+                            displayZoomControls = false
+                            allowFileAccess = false
+                            allowContentAccess = true
+                            allowFileAccessFromFileURLs = false
+                            allowUniversalAccessFromFileURLs = false
+                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            safeBrowsingEnabled = true
                         }
+                        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
 
                         val userAgent = profileData.getString("user_agent")
                         if (!userAgent.isNullOrBlank()) {
                             settings.userAgentString = userAgent
                         }
 
-                        // P1B COOKIES & STEALTH
                         val currentWv = this
                         CookieManager.getInstance().apply {
                             setAcceptCookie(true)
                             setAcceptThirdPartyCookies(currentWv, true)
                         }
-                        WebView.setWebContentsDebuggingEnabled(false)
 
-                        // P1B FULLSCREEN VIDEO
                         webChromeClient = object : WebChromeClient() {
-                            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                                WorkerWebViewBridge.updateFrom(
+                                    view,
+                                    progress = newProgress,
+                                    loading = newProgress < 100
+                                )
+                            }
+
+                            override fun onReceivedTitle(view: WebView, title: String?) {
+                                WorkerWebViewBridge.updateFrom(
+                                    view,
+                                    title = title.orEmpty()
+                                )
+                            }
+
+                            override fun onShowFileChooser(
+                                webView: WebView,
+                                filePathCallback: ValueCallback<Array<Uri>>,
+                                fileChooserParams: FileChooserParams
+                            ): Boolean {
+                                return WorkerWebViewBridge.host?.showFileChooser(
+                                    filePathCallback,
+                                    fileChooserParams
+                                ) ?: false
+                            }
+
+                            override fun onShowCustomView(
+                                view: View,
+                                callback: CustomViewCallback
+                            ) {
+                                val host = WorkerWebViewBridge.host
+                                if (host == null) {
+                                    callback.onCustomViewHidden()
+                                    return
+                                }
+                                host.showCustomView(view, callback)
                                 broadcastCustomView(true)
                             }
+
                             override fun onHideCustomView() {
+                                WorkerWebViewBridge.host?.hideCustomView()
                                 broadcastCustomView(false)
                             }
                         }
 
                         webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView,
+                                request: WebResourceRequest
+                            ): Boolean {
+                                val uri = request.url
+                                val scheme = uri.scheme?.lowercase()
+                                if (scheme == "http" || scheme == "https") {
+                                    return false
+                                }
+                                if (!request.isForMainFrame) return true
+                                val handled = WorkerWebViewBridge.host?.openExternalUri(uri) == true
+                                if (!handled) {
+                                    broadcastError("Unsupported URL scheme: $scheme")
+                                }
+                                return true
+                            }
+
+                            override fun onPageStarted(
+                                view: WebView?,
+                                url: String?,
+                                favicon: Bitmap?
+                            ) {
                                 super.onPageStarted(view, url, favicon)
+                                if (view != null) {
+                                    WorkerWebViewBridge.updateFrom(view, loading = true)
+                                }
                                 val currentUrl = url ?: "about:blank"
                                 broadcastState("BROWSING", currentUrl)
                                 try {
@@ -138,10 +222,26 @@ abstract class BaseEngineWorker : Service() {
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
+                                if (view != null) {
+                                    WorkerWebViewBridge.updateFrom(view, loading = false)
+                                }
                                 broadcastState("IDLE", url ?: "about:blank")
                             }
 
-                            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                            override fun onReceivedSslError(
+                                view: WebView,
+                                handler: SslErrorHandler,
+                                error: SslError
+                            ) {
+                                handler.cancel()
+                                broadcastError("SSL certificate error for ${error.url}")
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
                                 super.onReceivedError(view, request, error)
                                 if (request?.isForMainFrame == true) {
                                     val errorCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) error?.errorCode?.toString() ?: "UNKNOWN" else "ERROR"
@@ -152,10 +252,31 @@ abstract class BaseEngineWorker : Service() {
                                 }
                             }
                         }
+
+                        setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+                            val host = WorkerWebViewBridge.host
+                            if (host == null) {
+                                broadcastError("Open the interactive browser to download files")
+                            } else {
+                                host.requestDownload(
+                                    url = url,
+                                    userAgent = userAgent.orEmpty(),
+                                    contentDisposition = contentDisposition,
+                                    mimeType = mimeType,
+                                    contentLength = contentLength
+                                )
+                            }
+                        }
                     }
 
-                    val screenW = profileData.getInt("screen_width", 1080)
-                    val screenH = profileData.getInt("screen_height", 2400)
+                    val created = checkNotNull(webView)
+                    WorkerWebViewBridge.publish(
+                        view = created,
+                        wrapper = wrapper,
+                        profileId = profileId,
+                        width = screenW,
+                        height = screenH
+                    )
                     applyViewport(screenW, screenH)
                 }
 
@@ -167,13 +288,19 @@ abstract class BaseEngineWorker : Service() {
 
         override fun closeProfile(saveState: Boolean) {
             mainHandler.post {
-                val wv = webView
-                if (wv != null && saveState) {
+                val view = webView
+                if (view != null && saveState) {
                     val outBundle = Bundle()
-                    wv.saveState(outBundle)
+                    view.saveState(outBundle)
                 }
-                broadcastState("SLEEPING", wv?.url ?: "")
-                wv?.destroy()
+                broadcastState("SLEEPING", view?.url ?: "")
+                if (view != null) {
+                    WorkerWebViewBridge.clear(view, applicationContext)
+                    view.stopLoading()
+                    view.loadUrl("about:blank")
+                    view.removeAllViews()
+                    view.destroy()
+                }
                 webView = null
                 currentProfileId = -1
             }
@@ -193,15 +320,16 @@ abstract class BaseEngineWorker : Service() {
 
         override fun requestThumbnail() {
             mainHandler.post {
-                val wv = webView ?: return@post
-                val wvWidth = wv.width.takeIf { it > 0 } ?: 1080
-                val wvHeight = wv.height.takeIf { it > 0 } ?: 2400
+                val view = webView ?: return@post
+                if (WorkerWebViewBridge.isAttached(view)) return@post
+                val wvWidth = view.width.takeIf { it > 0 } ?: 1080
+                val wvHeight = view.height.takeIf { it > 0 } ?: 2400
                 val targetWidth = 300
                 val targetHeight = (300f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(600)
                 val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
                 val canvas = Canvas(bitmap)
                 canvas.scale(targetWidth.toFloat() / wvWidth.toFloat(), targetHeight.toFloat() / wvHeight.toFloat())
-                wv.draw(canvas)
+                view.draw(canvas)
                 val stream = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
                 bitmap.recycle()

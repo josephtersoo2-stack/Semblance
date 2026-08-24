@@ -78,4 +78,11 @@ class FleetViewModel @Inject constructor(
             engineClient.deleteProfile(id)
         }
     }
+
+    fun openInteractiveBrowser(id: Int) {
+        viewModelScope.launch {
+            engineClient.openInteractiveBrowser(id)
+        }
+    }
 }
+

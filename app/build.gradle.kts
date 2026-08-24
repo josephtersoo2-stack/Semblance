@@ -14,8 +14,8 @@ android {
         applicationId = "app.semblance"
         minSdk = 28
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.0-p1b"
+        versionCode = 3
+        versionName = "1.0.0-p1c"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -53,10 +53,15 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
 
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.11"
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     packaging {

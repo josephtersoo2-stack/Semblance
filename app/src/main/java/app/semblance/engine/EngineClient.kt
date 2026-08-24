@@ -25,4 +25,5 @@ interface EngineClient {
     suspend fun runQa(id: Int)
     suspend fun createProfileFromWizard(profile: app.semblance.data.local.entity.ProfileEntity)
     suspend fun deleteProfile(id: Int)
+    suspend fun openInteractiveBrowser(id: Int)
 }

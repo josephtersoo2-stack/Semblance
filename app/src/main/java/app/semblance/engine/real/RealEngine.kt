@@ -30,6 +30,15 @@ import app.semblance.engine.worker.EngineWorker5
 import app.semblance.engine.worker.EngineWorker6
 import app.semblance.engine.worker.EngineWorker7
 import app.semblance.engine.worker.EngineWorker8
+import app.semblance.ui.browser.BaseInteractiveBrowserActivity
+import app.semblance.ui.browser.BrowserActivity1
+import app.semblance.ui.browser.BrowserActivity2
+import app.semblance.ui.browser.BrowserActivity3
+import app.semblance.ui.browser.BrowserActivity4
+import app.semblance.ui.browser.BrowserActivity5
+import app.semblance.ui.browser.BrowserActivity6
+import app.semblance.ui.browser.BrowserActivity7
+import app.semblance.ui.browser.BrowserActivity8
 import app.semblance.util.UrlUtils
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
@@ -44,9 +53,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.lang.reflect.Proxy
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -151,6 +162,20 @@ class RealEngine @Inject constructor(
         }
     }
 
+    private fun getBrowserActivityClass(
+        slot: Int
+    ): Class<out BaseInteractiveBrowserActivity> = when (slot) {
+        1 -> BrowserActivity1::class.java
+        2 -> BrowserActivity2::class.java
+        3 -> BrowserActivity3::class.java
+        4 -> BrowserActivity4::class.java
+        5 -> BrowserActivity5::class.java
+        6 -> BrowserActivity6::class.java
+        7 -> BrowserActivity7::class.java
+        8 -> BrowserActivity8::class.java
+        else -> error("Invalid worker slot: $slot")
+    }
+
     @Synchronized
     private fun allocateSlotForProfile(profileId: Int): Int {
         profileSlotMap[profileId]?.let { return it }
@@ -209,8 +234,8 @@ class RealEngine @Inject constructor(
                 }
                 liveProfileIds.value = liveProfileIds.value + id
 
-                try {
-                    val callback = object : IEngineCallback.Stub() {
+                val callback: IEngineCallback = try {
+                    object : IEngineCallback.Stub() {
                         override fun onStateChanged(profileId: Int, status: String, currentUrl: String?) {
                             scope.launch {
                                 val p = profileRepository.getProfileSync(profileId)
@@ -285,8 +310,18 @@ class RealEngine @Inject constructor(
                             }
                         }
                     }
+                } catch (_: Throwable) {
+                    Proxy.newProxyInstance(
+                        IEngineCallback::class.java.classLoader,
+                        arrayOf(IEngineCallback::class.java)
+                    ) { _, _, _ -> null } as IEngineCallback
+                }
 
-                    worker?.registerCallback(callback)
+                try {
+                    val connectedWorker = requireNotNull(worker) {
+                        "Worker Binder was null for profile ${profile.id}"
+                    }
+                    connectedWorker.registerCallback(callback)
                     val bundle = Bundle().apply {
                         putInt("id", profile.id)
                         putString("suffix", profile.suffix)
@@ -295,11 +330,21 @@ class RealEngine @Inject constructor(
                         putInt("screen_width", if (profile.screenWidth > 0) profile.screenWidth else 1080)
                         putInt("screen_height", if (profile.screenHeight > 0) profile.screenHeight else 2400)
                     }
-                    worker?.openProfile(bundle)
-                } catch (_: Throwable) {
-                    // Ignore IPC stubbing/binding errors
-                } finally {
+                    connectedWorker.openProfile(bundle)
                     deferredReady.complete(Unit)
+                } catch (error: Throwable) {
+                    deferredReady.completeExceptionally(error)
+                    workers.remove(id)
+                    ready.remove(id)
+                    connections.remove(id)?.let { failedConnection ->
+                        runCatching { context.unbindService(failedConnection) }
+                    }
+                    profileSlotMap.remove(id)
+                    slotProfileMap.remove(slot)
+                    liveProfileIds.value = liveProfileIds.value - id
+                    scope.launch {
+                        emitError(profile.id, "Worker initialisation failed: ${error.message}")
+                    }
                 }
             }
 
@@ -315,7 +360,14 @@ class RealEngine @Inject constructor(
 
         connections[id] = conn
         try {
-            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+            val bound = context.bindService(
+                intent,
+                conn,
+                Context.BIND_AUTO_CREATE
+            )
+            if (!bound) {
+                error("bindService returned false for profile $id")
+            }
         } catch (e: Throwable) {
             connections.remove(id)
             ready.remove(id)
@@ -481,6 +533,55 @@ class RealEngine @Inject constructor(
         )
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
+    }
+
+    override suspend fun openInteractiveBrowser(id: Int) {
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
+            open(id)
+        }
+        val opened = try {
+            withTimeout(5_000L) {
+                ready[id]?.await()
+                    ?: error("No readiness signal for profile $id")
+            }
+            true
+        } catch (error: Throwable) {
+            emitError(id, "Browser worker failed: ${error.message}")
+            false
+        }
+        if (!opened) return
+        val profile = profileRepository.getProfileSync(id)
+        if (profile == null) {
+            emitError(id, "Profile $id does not exist")
+            return
+        }
+        val slot = profileSlotMap[id]
+        if (slot == null) {
+            emitError(id, "Profile $id has no worker slot")
+            return
+        }
+        try {
+            workers[id]?.maximize()
+            val intent = Intent(
+                context,
+                getBrowserActivityClass(slot)
+            ).apply {
+                putExtra(
+                    BaseInteractiveBrowserActivity.EXTRA_PROFILE_ID,
+                    profile.id
+                )
+                putExtra(
+                    BaseInteractiveBrowserActivity.EXTRA_ALIAS,
+                    profile.alias
+                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            context.startActivity(intent)
+        } catch (error: Throwable) {
+            emitError(id, "Cannot open browser: ${error.message}")
+        }
     }
 
     private suspend fun emitError(profileId: Int, message: String) {

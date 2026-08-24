@@ -165,7 +165,7 @@ fun AppNav(
                 FleetScreen(
                     viewModel = viewModel,
                     onNavigateToMaximized = { id ->
-                        navController.navigate(Screen.Maximized.createRoute(id))
+                        viewModel.openInteractiveBrowser(id)
                     },
                     onNavigateToWizard = {
                         navController.navigate(Screen.Wizard.route)

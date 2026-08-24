@@ -592,6 +592,10 @@ class MockEngine @Inject constructor(
         liveProfileIds.value = liveProfileIds.value - id
         profileRepository.deleteProfile(id)
     }
+
+    override suspend fun openInteractiveBrowser(id: Int) {
+        maximize(id)
+    }
 }
 
 private fun ProfileEntity.toUiState(isLive: Boolean): ProfileUiState {

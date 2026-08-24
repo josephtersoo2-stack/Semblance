@@ -3,6 +3,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:name=".SemblanceApp"
@@ -14,6 +17,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:hardwareAccelerated="true"
         android:theme="@style/Theme.Semblance">
         <activity
             android:name=".MainActivity"
@@ -24,6 +28,63 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.browser.BrowserActivity1"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker1"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity2"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker2"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity3"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker3"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity4"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker4"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity5"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker5"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity6"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker6"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity7"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker7"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.browser.BrowserActivity8"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:process=":worker8"
+            android:theme="@style/Theme.Semblance"
+            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".engine.worker.EngineWorker1"
