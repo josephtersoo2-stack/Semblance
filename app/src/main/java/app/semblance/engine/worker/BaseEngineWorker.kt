@@ -14,13 +14,13 @@ import android.os.Process
 import android.os.RemoteCallbackList
 import android.os.RemoteException
 import android.view.View
-import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.CookieManager
 import app.semblance.engine.ipc.IEngineCallback
 import app.semblance.engine.ipc.IEngineWorker
 import app.semblance.engine.model.ActionJson
@@ -54,20 +54,17 @@ abstract class BaseEngineWorker : Service() {
             val suffix = profileData.getString("suffix") ?: return
             val profileId = profileData.getInt("id", -1)
 
-            // CRITICAL RULE 1: If suffix changes, process must die so a fresh process can set it
             if (currentSuffix != null && currentSuffix != suffix) {
                 Process.killProcess(Process.myPid())
                 return
             }
 
             mainHandler.post {
-                // CRITICAL RULE 1 & §4: Must be called before ANY WebView is instantiated
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && currentSuffix == null) {
                     try {
                         WebView.setDataDirectorySuffix(suffix)
                         currentSuffix = suffix
                     } catch (e: IllegalStateException) {
-                        // Suffix already set or WebView previously initialized
                         if (currentSuffix != suffix) {
                             Process.killProcess(Process.myPid())
                             return@post
@@ -79,48 +76,38 @@ abstract class BaseEngineWorker : Service() {
 
                 if (webView == null) {
                     webView = WebView(this@BaseEngineWorker).apply {
+                        // P1B HARDENING SETTINGS
                         settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
                             databaseEnabled = true
-                            useWideViewPort = true               // CRITICAL for mobile layouts
+                            useWideViewPort = true
                             loadWithOverviewMode = true
                             setSupportZoom(false)
                             builtInZoomControls = false
-                            mediaPlaybackRequiresUserGesture = false 
-                            cacheMode = WebSettings.LOAD_DEFAULT // Real cache behavior
+                            mediaPlaybackRequiresUserGesture = false
+                            cacheMode = WebSettings.LOAD_DEFAULT
                         }
-
+                        
                         val userAgent = profileData.getString("user_agent")
                         if (!userAgent.isNullOrBlank()) {
                             settings.userAgentString = userAgent
                         }
 
+                        // P1B COOKIES & STEALTH
                         val currentWv = this
                         CookieManager.getInstance().apply {
                             setAcceptCookie(true)
-                            setAcceptThirdPartyCookies(currentWv, true) // Required for Google Auth & YouTube
+                            setAcceptThirdPartyCookies(currentWv, true)
                         }
-                        WebView.setWebContentsDebuggingEnabled(false)    // Stealth: hide devtools
+                        WebView.setWebContentsDebuggingEnabled(false)
 
+                        // P1B FULLSCREEN VIDEO
                         webChromeClient = object : WebChromeClient() {
-                            private var customView: View? = null
-                            private var customViewCallback: CustomViewCallback? = null
-
                             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                                if (customView != null) {
-                                    callback?.onCustomViewHidden()
-                                    return
-                                }
-                                customView = view
-                                customViewCallback = callback
-                                // Notify Main Process UI to show a fullscreen overlay
                                 broadcastCustomView(true)
                             }
-
                             override fun onHideCustomView() {
-                                customViewCallback?.onCustomViewHidden()
-                                customView = null
                                 broadcastCustomView(false)
                             }
                         }
@@ -130,36 +117,22 @@ abstract class BaseEngineWorker : Service() {
                                 super.onPageStarted(view, url, favicon)
                                 val currentUrl = url ?: "about:blank"
                                 broadcastState("BROWSING", currentUrl)
-
                                 try {
                                     val uri = Uri.parse(currentUrl)
                                     val host = uri.host
-                                    if (!host.isNullOrBlank()) {
-                                        broadcastDomain(host)
-                                    }
-                                } catch (e: Exception) {
-                                    // Ignore parse errors
-                                }
+                                    if (!host.isNullOrBlank()) { broadcastDomain(host) }
+                                } catch (e: Exception) {}
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
-                                val currentUrl = url ?: "about:blank"
-                                broadcastState("IDLE", currentUrl)
+                                broadcastState("IDLE", url ?: "about:blank")
                             }
 
-                            override fun onReceivedError(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                                error: WebResourceError?
-                            ) {
+                            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                 super.onReceivedError(view, request, error)
                                 if (request?.isForMainFrame == true) {
-                                    val errorMsg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                        error?.description?.toString() ?: "Network error"
-                                    } else {
-                                        "Network error"
-                                    }
+                                    val errorMsg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) error?.description?.toString() ?: "Network error" else "Network error"
                                     broadcastError(errorMsg)
                                     broadcastState("ERROR", view?.url ?: "about:blank")
                                 }
@@ -188,68 +161,23 @@ abstract class BaseEngineWorker : Service() {
             }
         }
 
-        override fun loadUrl(url: String) {
-            mainHandler.post {
-                webView?.loadUrl(url)
-            }
-        }
+        override fun loadUrl(url: String) { mainHandler.post { webView?.loadUrl(url) } }
 
         override fun requestThumbnail() {
             mainHandler.post {
                 val wv = webView ?: return@post
                 val wvWidth = wv.width.coerceAtLeast(1)
                 val wvHeight = wv.height.coerceAtLeast(1)
-
-                // CRITICAL RULE 2: Strict Binder Limit Enforcement
                 val targetWidth = 300
                 val targetHeight = (300f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(600)
-
                 val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
                 val canvas = Canvas(bitmap)
-                val scaleX = targetWidth.toFloat() / wvWidth.toFloat()
-                val scaleY = targetHeight.toFloat() / wvHeight.toFloat()
-                canvas.scale(scaleX, scaleY)
+                canvas.scale(targetWidth.toFloat() / wvWidth.toFloat(), targetHeight.toFloat() / wvHeight.toFloat())
                 wv.draw(canvas)
-
                 val stream = ByteArrayOutputStream()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 50, stream)
                 bitmap.recycle()
-
-                val jpegBytes = stream.toByteArray()
-                broadcastThumbnail(jpegBytes)
-            }
-        }
-
-        override fun maximize() {
-            mainHandler.post {
-                // Unmute all media elements in this worker's WebView
-                webView?.evaluateJavascript(
-                    "document.querySelectorAll('video, audio').forEach(el => el.muted = false)", null
-                )
-            }
-        }
-
-        override fun minimize() {
-            mainHandler.post {
-                // Mute all media elements so 8 profiles don't scream at the operator
-                webView?.evaluateJavascript(
-                    "document.querySelectorAll('video, audio').forEach(el => el.muted = true)", null
-                )
-            }
-        }
-
-        override fun simulateAppSwitch(durationMs: Long) {
-            mainHandler.post {
-                val wv = webView ?: return@post
-                // onPause() triggers Chromium's internal visibilitychange event to 'hidden'
-                // YouTube will automatically pause the video.
-                wv.onPause()
-
-                mainHandler.postDelayed({
-                    // onResume() restores visibility to 'visible', video remains paused
-                    // until the agent taps play (human behavior).
-                    wv.onResume()
-                }, durationMs)
+                broadcastThumbnail(stream.toByteArray())
             }
         }
 
@@ -258,108 +186,68 @@ abstract class BaseEngineWorker : Service() {
                 try {
                     val action = json.decodeFromString<ActionJson>(actionJson)
                     when (action) {
-                        is ActionJson.Navigate -> {
-                            webView?.loadUrl(action.url)
-                        }
-                        is ActionJson.Tap -> {
-                            broadcastState("TYPING", webView?.url ?: "")
-                        }
-                        is ActionJson.TypeText -> {
-                            broadcastState("TYPING", webView?.url ?: "")
-                        }
-                        is ActionJson.Back -> {
-                            if (webView?.canGoBack() == true) {
-                                webView?.goBack()
-                            }
-                        }
-                        is ActionJson.Wait -> {
-                            broadcastState("IDLE", webView?.url ?: "")
-                        }
-                        is ActionJson.Maximize -> {
-                            maximize()
-                        }
-                        is ActionJson.Minimize -> {
-                            minimize()
-                        }
-                        is ActionJson.SimulateAppSwitch -> {
-                            simulateAppSwitch(action.durationMs)
-                        }
-                        is ActionJson.Volume -> {
-                            if (action.dir.lowercase() == "mute") {
-                                minimize()
-                            } else {
-                                maximize()
-                            }
-                        }
-                        else -> {
-                            // Supported in P2 Motor phase
-                        }
+                        is ActionJson.Navigate -> webView?.loadUrl(action.url)
+                        is ActionJson.Tap -> broadcastState("TYPING", webView?.url ?: "")
+                        is ActionJson.TypeText -> broadcastState("TYPING", webView?.url ?: "")
+                        is ActionJson.Back -> if (webView?.canGoBack() == true) webView?.goBack()
+                        is ActionJson.Wait -> broadcastState("IDLE", webView?.url ?: "")
+                        else -> {}
                     }
-                } catch (e: Exception) {
-                    broadcastError("Failed to execute action: ${e.message}")
-                }
+                } catch (e: Exception) { broadcastError("Failed to execute action: ${e.message}") }
             }
         }
 
-        override fun registerCallback(cb: IEngineCallback?) {
-            if (cb != null) {
-                callbacks.register(cb)
+        // P1B MINIMIZE / MAXIMIZE / APP SWITCH
+        override fun maximize() {
+            mainHandler.post {
+                webView?.evaluateJavascript("document.querySelectorAll('video, audio').forEach(el => el.muted = false)", null)
             }
         }
 
-        override fun unregisterCallback(cb: IEngineCallback?) {
-            if (cb != null) {
-                callbacks.unregister(cb)
+        override fun minimize() {
+            mainHandler.post {
+                webView?.evaluateJavascript("document.querySelectorAll('video, audio').forEach(el => el.muted = true)", null)
             }
         }
+
+        override fun simulateAppSwitch(durationMs: Long) {
+            mainHandler.post {
+                val wv = webView ?: return@post
+                wv.onPause()
+                mainHandler.postDelayed({ wv.onResume() }, durationMs)
+            }
+        }
+
+        override fun registerCallback(cb: IEngineCallback?) { if (cb != null) callbacks.register(cb) }
+        override fun unregisterCallback(cb: IEngineCallback?) { if (cb != null) callbacks.unregister(cb) }
     }
 
     private fun broadcastState(status: String, url: String) {
-        val pid = currentProfileId
-        broadcastCallbacks { cb ->
-            cb.onStateChanged(pid, status, url)
-        }
+        broadcastCallbacks { cb -> cb.onStateChanged(currentProfileId, status, url) }
     }
 
     private fun broadcastDomain(host: String) {
-        val pid = currentProfileId
-        broadcastCallbacks { cb ->
-            cb.onDomainVisited(pid, host)
-        }
+        broadcastCallbacks { cb -> cb.onDomainVisited(currentProfileId, host) }
     }
 
     private fun broadcastError(message: String) {
-        val pid = currentProfileId
-        broadcastCallbacks { cb ->
-            cb.onError(pid, message)
-        }
+        broadcastCallbacks { cb -> cb.onError(currentProfileId, message) }
     }
 
     private fun broadcastThumbnail(jpegData: ByteArray) {
-        val pid = currentProfileId
-        broadcastCallbacks { cb ->
-            cb.onThumbnailReady(pid, jpegData)
-        }
+        broadcastCallbacks { cb -> cb.onThumbnailReady(currentProfileId, jpegData) }
     }
 
     private fun broadcastCustomView(isShowing: Boolean) {
-        broadcastCallbacks { cb ->
-            cb.onCustomViewChanged(isShowing)
-        }
+        broadcastCallbacks { cb -> cb.onCustomViewChanged(isShowing) }
     }
 
     private inline fun broadcastCallbacks(crossinline action: (IEngineCallback) -> Unit) {
         val count = callbacks.beginBroadcast()
         try {
             for (i in 0 until count) {
-                try {
-                    action(callbacks.getBroadcastItem(i))
-                } catch (e: RemoteException) {
-                    // Dead binder connection
-                }
+                try { action(callbacks.getBroadcastItem(i)) } catch (e: RemoteException) {}
             }
-        } finally {
-            callbacks.finishBroadcast()
-        }
+        } finally { callbacks.finishBroadcast() }
     }
 }
