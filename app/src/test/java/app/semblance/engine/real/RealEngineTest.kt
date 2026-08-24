@@ -1,6 +1,12 @@
 package app.semblance.engine.real
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Bundle
+import android.os.IBinder
 import app.semblance.data.local.dao.EventDao
 import app.semblance.data.local.dao.ProfileDao
 import app.semblance.data.local.dao.TaskDao
@@ -11,6 +17,8 @@ import app.semblance.data.repository.EventRepository
 import app.semblance.data.repository.ProfileRepository
 import app.semblance.data.repository.TaskRepository
 import app.semblance.data.seed.ProfileSeeder
+import app.semblance.engine.ipc.IEngineCallback
+import app.semblance.engine.ipc.IEngineWorker
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -20,9 +28,9 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import android.content.ContextWrapper
 import org.junit.Before
 import org.junit.Test
+import java.lang.reflect.Proxy
 
 class RealEngineTest {
 
@@ -103,6 +111,9 @@ class RealEngineTest {
         }
     }
 
+    private lateinit var mockWorker: IEngineWorker
+    private lateinit var mockBinder: IBinder
+
     @Before
     fun setup() {
         profilesStore.clear()
@@ -112,7 +123,41 @@ class RealEngineTest {
         taskRepository = TaskRepository(fakeTaskDao)
         eventRepository = EventRepository(fakeEventDao)
         profileSeeder = ProfileSeeder(profileRepository)
-        mockContext = object : ContextWrapper(null) {}
+
+        mockBinder = Proxy.newProxyInstance(
+            IBinder::class.java.classLoader,
+            arrayOf(IBinder::class.java)
+        ) { _, method, _ ->
+            if (method.name == "queryLocalInterface") {
+                mockWorker
+            } else {
+                null
+            }
+        } as IBinder
+
+        mockWorker = object : IEngineWorker {
+            override fun openProfile(profileData: Bundle?) {}
+            override fun closeProfile(saveState: Boolean) {}
+            override fun loadUrl(url: String?) {}
+            override fun requestThumbnail() {}
+            override fun executeAction(actionJson: String?) {}
+            override fun maximize() {}
+            override fun minimize() {}
+            override fun simulateAppSwitch(durationMs: Long) {}
+            override fun registerCallback(cb: IEngineCallback?) {}
+            override fun unregisterCallback(cb: IEngineCallback?) {}
+            override fun asBinder(): IBinder = mockBinder
+        }
+
+        mockContext = object : ContextWrapper(null) {
+            override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean {
+                conn.onServiceConnected(ComponentName("app.semblance", "EngineWorker1"), mockBinder)
+                return true
+            }
+            override fun unbindService(conn: ServiceConnection) {
+                conn.onServiceDisconnected(ComponentName("app.semblance", "EngineWorker1"))
+            }
+        }
     }
 
     @Test

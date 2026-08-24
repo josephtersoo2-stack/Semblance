@@ -14,16 +14,17 @@ import android.os.Process
 import android.os.RemoteCallbackList
 import android.os.RemoteException
 import android.view.View
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.CookieManager
 import app.semblance.engine.ipc.IEngineCallback
 import app.semblance.engine.ipc.IEngineWorker
 import app.semblance.engine.model.ActionJson
+import app.semblance.util.UrlUtils
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayOutputStream
 
@@ -46,6 +47,17 @@ abstract class BaseEngineWorker : Service() {
         }
         callbacks.kill()
         super.onDestroy()
+    }
+
+    private fun applyViewport(w: Int, h: Int) {
+        mainHandler.post {
+            val wv = webView ?: return@post
+            wv.measure(
+                View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+            )
+            wv.layout(0, 0, w, h)
+        }
     }
 
     private val binder = object : IEngineWorker.Stub() {
@@ -132,27 +144,24 @@ abstract class BaseEngineWorker : Service() {
                             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                 super.onReceivedError(view, request, error)
                                 if (request?.isForMainFrame == true) {
-                                    val errorMsg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) error?.description?.toString() ?: "Network error" else "Network error"
-                                    broadcastError(errorMsg)
-                                    broadcastState("ERROR", view?.url ?: "about:blank")
+                                    val errorCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) error?.errorCode?.toString() ?: "UNKNOWN" else "ERROR"
+                                    val errorDesc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) error?.description?.toString() ?: "Network error" else "Network error"
+                                    val failedUrl = request.url?.toString() ?: view?.url ?: "about:blank"
+                                    broadcastError("Failed loading $failedUrl ($errorCode: $errorDesc)")
+                                    broadcastState("ERROR", failedUrl)
                                 }
                             }
                         }
-
-                        // Ensure headless WebView in Service has realistic mobile dimensions for Chromium layout
-                        val defaultWidth = 1080
-                        val defaultHeight = 2400
-                        measure(
-                            View.MeasureSpec.makeMeasureSpec(defaultWidth, View.MeasureSpec.EXACTLY),
-                            View.MeasureSpec.makeMeasureSpec(defaultHeight, View.MeasureSpec.EXACTLY)
-                        )
-                        layout(0, 0, defaultWidth, defaultHeight)
                     }
+
+                    val screenW = profileData.getInt("screen_width", 1080)
+                    val screenH = profileData.getInt("screen_height", 2400)
+                    applyViewport(screenW, screenH)
                 }
 
-                val lastUrl = profileData.getString("last_url")?.takeIf { it.isNotBlank() } ?: "https://www.google.com"
-                webView?.loadUrl(lastUrl)
-                broadcastState("IDLE", lastUrl)
+                val rawUrl = profileData.getString("last_url")?.takeIf { it.isNotBlank() } ?: "https://www.google.com"
+                val initialUrl = UrlUtils.normalizeUrl(rawUrl) ?: "https://www.google.com"
+                webView?.loadUrl(initialUrl)
             }
         }
 
@@ -170,22 +179,25 @@ abstract class BaseEngineWorker : Service() {
             }
         }
 
-        override fun loadUrl(url: String) { mainHandler.post { webView?.loadUrl(url) } }
+        override fun loadUrl(url: String) {
+            mainHandler.post {
+                val normalized = UrlUtils.normalizeUrl(url)
+                if (normalized != null) {
+                    webView?.loadUrl(normalized)
+                } else {
+                    broadcastError("Invalid URL: $url")
+                    broadcastState("ERROR", url)
+                }
+            }
+        }
 
         override fun requestThumbnail() {
             mainHandler.post {
                 val wv = webView ?: return@post
-                val wvWidth = wv.width.takeIf { it > 100 } ?: 1080
-                val wvHeight = wv.height.takeIf { it > 100 } ?: 2400
-                if (wv.width <= 0 || wv.height <= 0) {
-                    wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(wvWidth, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(wvHeight, View.MeasureSpec.EXACTLY)
-                    )
-                    wv.layout(0, 0, wvWidth, wvHeight)
-                }
-                val targetWidth = 360
-                val targetHeight = (360f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(800)
+                val wvWidth = wv.width.takeIf { it > 0 } ?: 1080
+                val wvHeight = wv.height.takeIf { it > 0 } ?: 2400
+                val targetWidth = 300
+                val targetHeight = (300f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(600)
                 val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
                 val canvas = Canvas(bitmap)
                 canvas.scale(targetWidth.toFloat() / wvWidth.toFloat(), targetHeight.toFloat() / wvHeight.toFloat())
@@ -202,7 +214,15 @@ abstract class BaseEngineWorker : Service() {
                 try {
                     val action = json.decodeFromString<ActionJson>(actionJson)
                     when (action) {
-                        is ActionJson.Navigate -> webView?.loadUrl(action.url)
+                        is ActionJson.Navigate -> {
+                            val normalized = UrlUtils.normalizeUrl(action.url)
+                            if (normalized != null) {
+                                webView?.loadUrl(normalized)
+                            } else {
+                                broadcastError("Invalid URL: ${action.url}")
+                                broadcastState("ERROR", action.url)
+                            }
+                        }
                         is ActionJson.Tap -> broadcastState("TYPING", webView?.url ?: "")
                         is ActionJson.TypeText -> broadcastState("TYPING", webView?.url ?: "")
                         is ActionJson.Back -> if (webView?.canGoBack() == true) webView?.goBack()

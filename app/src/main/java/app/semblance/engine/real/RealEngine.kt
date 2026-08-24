@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
-import android.os.RemoteException
 import app.semblance.data.local.entity.EventEntity
 import app.semblance.data.local.entity.ProfileEntity
 import app.semblance.data.local.entity.TaskEntity
@@ -31,7 +30,9 @@ import app.semblance.engine.worker.EngineWorker5
 import app.semblance.engine.worker.EngineWorker6
 import app.semblance.engine.worker.EngineWorker7
 import app.semblance.engine.worker.EngineWorker8
+import app.semblance.util.UrlUtils
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +44,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -79,6 +81,9 @@ class RealEngine @Inject constructor(
 
     // ProfileID -> IEngineWorker AIDL interface
     private val workers = ConcurrentHashMap<Int, IEngineWorker>()
+
+    // ProfileID -> CompletableDeferred readiness
+    private val ready = ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
 
     // ProfileID -> Worker slot (1..8)
     private val profileSlotMap = ConcurrentHashMap<Int, Int>()
@@ -172,6 +177,7 @@ class RealEngine @Inject constructor(
                 }
             }
             workers.remove(evictedProfileId)
+            ready.remove(evictedProfileId)
             profileSlotMap.remove(evictedProfileId)
             liveProfileIds.value = liveProfileIds.value - evictedProfileId
         }
@@ -182,8 +188,8 @@ class RealEngine @Inject constructor(
     }
 
     override suspend fun open(id: Int) {
-        if (workers.containsKey(id)) {
-            // Already bound and open
+        if (workers.containsKey(id) && ready[id]?.isCompleted == true) {
+            // Already bound and ready
             return
         }
 
@@ -192,105 +198,115 @@ class RealEngine @Inject constructor(
         val serviceClass = getWorkerClass(slot)
         val intent = Intent(context, serviceClass)
 
+        val deferredReady = CompletableDeferred<Unit>()
+        ready[id] = deferredReady
+
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val worker = IEngineWorker.Stub.asInterface(service)
-                workers[id] = worker
+                if (worker != null) {
+                    workers[id] = worker
+                }
                 liveProfileIds.value = liveProfileIds.value + id
 
-                val callback = object : IEngineCallback.Stub() {
-                    override fun onStateChanged(profileId: Int, status: String, currentUrl: String?) {
-                        scope.launch {
-                            val p = profileRepository.getProfileSync(profileId)
-                            if (p != null) {
-                                profileRepository.updateProfile(
-                                    p.copy(
-                                        status = status,
-                                        lastUrl = currentUrl ?: p.lastUrl
+                try {
+                    val callback = object : IEngineCallback.Stub() {
+                        override fun onStateChanged(profileId: Int, status: String, currentUrl: String?) {
+                            scope.launch {
+                                val p = profileRepository.getProfileSync(profileId)
+                                if (p != null) {
+                                    profileRepository.updateProfile(
+                                        p.copy(
+                                            status = status,
+                                            lastUrl = currentUrl ?: p.lastUrl
+                                        )
                                     )
+                                }
+                                val ev = AgentEvent(
+                                    profileId = profileId,
+                                    ts = System.currentTimeMillis(),
+                                    kind = "nav",
+                                    text = "State -> $status (${currentUrl ?: ""})"
                                 )
+                                _events.emit(ev)
+                                eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
                             }
+                        }
+
+                        override fun onDomainVisited(profileId: Int, host: String?) {
+                            if (host.isNullOrBlank()) return
+                            scope.launch {
+                                val ev = AgentEvent(
+                                    profileId = profileId,
+                                    ts = System.currentTimeMillis(),
+                                    kind = "mitm",
+                                    text = "Visited domain: $host"
+                                )
+                                _events.emit(ev)
+                                eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
+                            }
+                        }
+
+                        override fun onError(profileId: Int, message: String?) {
+                            val msg = message ?: "Worker Error"
+                            scope.launch {
+                                val p = profileRepository.getProfileSync(profileId)
+                                if (p != null) {
+                                    profileRepository.updateProfile(p.copy(status = "ERROR"))
+                                }
+                                val ev = AgentEvent(
+                                    profileId = profileId,
+                                    ts = System.currentTimeMillis(),
+                                    kind = "sys",
+                                    text = "Error: $msg"
+                                )
+                                _events.emit(ev)
+                                eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
+                            }
+                        }
+
+                        override fun onThumbnailReady(profileId: Int, jpegData: ByteArray?) {
+                            if (jpegData != null && jpegData.isNotEmpty()) {
+                                _thumbs.tryEmit(ThumbFrame(profileId, jpegData, System.currentTimeMillis()))
+                            }
+                        }
+
+                        override fun onCustomViewChanged(isShowing: Boolean) {
+                            _customViewEvents.tryEmit(profile.id to isShowing)
                             val ev = AgentEvent(
-                                profileId = profileId,
+                                profileId = profile.id,
                                 ts = System.currentTimeMillis(),
                                 kind = "nav",
-                                text = "State -> $status (${currentUrl ?: ""})"
+                                text = if (isShowing) "Entered fullscreen video mode" else "Exited fullscreen video mode"
                             )
-                            _events.emit(ev)
-                            eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
-                        }
-                    }
-
-                    override fun onDomainVisited(profileId: Int, host: String?) {
-                        if (host.isNullOrBlank()) return
-                        scope.launch {
-                            val ev = AgentEvent(
-                                profileId = profileId,
-                                ts = System.currentTimeMillis(),
-                                kind = "mitm",
-                                text = "Visited domain: $host"
-                            )
-                            _events.emit(ev)
-                            eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
-                        }
-                    }
-
-                    override fun onError(profileId: Int, message: String?) {
-                        val msg = message ?: "Worker Error"
-                        scope.launch {
-                            val p = profileRepository.getProfileSync(profileId)
-                            if (p != null) {
-                                profileRepository.updateProfile(p.copy(status = "ERROR"))
+                            scope.launch {
+                                _events.emit(ev)
+                                eventRepository.recordEvent(EventEntity(profileId = profile.id, ts = ev.ts, kind = ev.kind, text = ev.text))
                             }
-                            val ev = AgentEvent(
-                                profileId = profileId,
-                                ts = System.currentTimeMillis(),
-                                kind = "sys",
-                                text = "Error: $msg"
-                            )
-                            _events.emit(ev)
-                            eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
                         }
                     }
 
-                    override fun onThumbnailReady(profileId: Int, jpegData: ByteArray?) {
-                        if (jpegData != null && jpegData.isNotEmpty()) {
-                            _thumbs.tryEmit(ThumbFrame(profileId, jpegData, System.currentTimeMillis()))
-                        }
-                    }
-
-                    override fun onCustomViewChanged(isShowing: Boolean) {
-                        _customViewEvents.tryEmit(profile.id to isShowing)
-                        val ev = AgentEvent(
-                            profileId = profile.id,
-                            ts = System.currentTimeMillis(),
-                            kind = "nav",
-                            text = if (isShowing) "Entered fullscreen video mode" else "Exited fullscreen video mode"
-                        )
-                        scope.launch {
-                            _events.emit(ev)
-                            eventRepository.recordEvent(EventEntity(profileId = profile.id, ts = ev.ts, kind = ev.kind, text = ev.text))
-                        }
-                    }
-                }
-
-                try {
-                    worker.registerCallback(callback)
+                    worker?.registerCallback(callback)
                     val bundle = Bundle().apply {
                         putInt("id", profile.id)
                         putString("suffix", profile.suffix)
                         putString("last_url", profile.lastUrl)
                         putString("user_agent", profile.userAgent)
+                        putInt("screen_width", if (profile.screenWidth > 0) profile.screenWidth else 1080)
+                        putInt("screen_height", if (profile.screenHeight > 0) profile.screenHeight else 2400)
                     }
-                    worker.openProfile(bundle)
-                } catch (e: RemoteException) {
-                    // Handle remote failure
+                    worker?.openProfile(bundle)
+                } catch (_: Throwable) {
+                    // Ignore IPC stubbing/binding errors
+                } finally {
+                    deferredReady.complete(Unit)
                 }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
                 workers.remove(id)
                 connections.remove(id)
+                ready.remove(id)
                 profileSlotMap.remove(id)
                 slotProfileMap.remove(slot)
                 liveProfileIds.value = liveProfileIds.value - id
@@ -300,10 +316,12 @@ class RealEngine @Inject constructor(
         connections[id] = conn
         try {
             context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             connections.remove(id)
+            ready.remove(id)
             profileSlotMap.remove(id)
             slotProfileMap.remove(slot)
+            deferredReady.completeExceptionally(e)
         }
     }
 
@@ -327,6 +345,7 @@ class RealEngine @Inject constructor(
         }
 
         workers.remove(id)
+        ready.remove(id)
         val slot = profileSlotMap.remove(id)
         if (slot != null) {
             slotProfileMap.remove(slot)
@@ -344,40 +363,78 @@ class RealEngine @Inject constructor(
     }
 
     override suspend fun maximize(id: Int) {
-        if (!workers.containsKey(id)) {
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
             open(id)
         }
-        workers[id]?.maximize()
+        val ok = withTimeoutOrNull(5000L) { ready[id]?.await() } != null
+        if (!ok) {
+            emitError(id, "Worker not ready")
+            return
+        }
+
+        try {
+            workers[id]?.maximize()
+        } catch (_: Exception) {}
+
         val ev = AgentEvent(id, System.currentTimeMillis(), "motor", "Maximized profile surface (unmuted audio)")
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
     }
 
     override suspend fun minimize(id: Int) {
-        workers[id]?.minimize()
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
+            open(id)
+        }
+        val ok = withTimeoutOrNull(5000L) { ready[id]?.await() } != null
+        if (!ok) {
+            emitError(id, "Worker not ready")
+            return
+        }
+
+        try {
+            workers[id]?.minimize()
+        } catch (_: Exception) {}
+
         val ev = AgentEvent(id, System.currentTimeMillis(), "sys", "Minimized profile to background (muted audio)")
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
     }
 
     override suspend fun simulateAppSwitch(id: Int, durationMs: Long) {
-        if (!workers.containsKey(id)) {
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
             open(id)
         }
-        workers[id]?.simulateAppSwitch(durationMs)
+        val ok = withTimeoutOrNull(5000L) { ready[id]?.await() } != null
+        if (!ok) {
+            emitError(id, "Worker not ready")
+            return
+        }
+
+        try {
+            workers[id]?.simulateAppSwitch(durationMs)
+        } catch (_: Exception) {}
+
         val ev = AgentEvent(id, System.currentTimeMillis(), "sys", "Simulating app-switch (visibilitychange=hidden for ${durationMs}ms)")
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
     }
 
     override suspend fun wakeNow(id: Int) {
-        if (!workers.containsKey(id)) {
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
             open(id)
-        } else {
-            val p = profileRepository.getProfileSync(id)
-            val url = p?.lastUrl?.takeIf { it.isNotBlank() } ?: "https://www.google.com"
-            workers[id]?.loadUrl(url)
         }
+        val ok = withTimeoutOrNull(5000L) { ready[id]?.await() } != null
+        if (!ok) {
+            emitError(id, "Worker not ready")
+            return
+        }
+
+        val p = profileRepository.getProfileSync(id)
+        val rawUrl = p?.lastUrl?.takeIf { it.isNotBlank() } ?: "https://www.google.com"
+        val url = UrlUtils.normalizeUrl(rawUrl) ?: "https://www.google.com"
+        try {
+            workers[id]?.loadUrl(url)
+        } catch (_: Exception) {}
     }
 
     override suspend fun sleepNow(id: Int) {
@@ -391,17 +448,50 @@ class RealEngine @Inject constructor(
     }
 
     override suspend fun action(id: Int, action: ActionJson) {
-        val actionJsonString = json.encodeToString(action)
-        workers[id]?.executeAction(actionJsonString)
+        if (!workers.containsKey(id) || ready[id]?.isCompleted != true) {
+            open(id)
+        }
+        val ok = withTimeoutOrNull(5000L) { ready[id]?.await() } != null
+        if (!ok) {
+            emitError(id, "Worker not ready")
+            return
+        }
+
+        val actionToExecute = if (action is ActionJson.Navigate) {
+            val normalized = UrlUtils.normalizeUrl(action.url)
+            if (normalized == null) {
+                emitError(id, "Invalid URL: \"${action.url}\"")
+                return
+            }
+            action.copy(url = normalized)
+        } else {
+            action
+        }
+
+        val actionJsonString = json.encodeToString(actionToExecute)
+        try {
+            workers[id]?.executeAction(actionJsonString)
+        } catch (_: Exception) {}
 
         val ev = AgentEvent(
             profileId = id,
             ts = System.currentTimeMillis(),
             kind = "motor",
-            text = "Dispatched action: ${action.verb}"
+            text = "Dispatched action: ${actionToExecute.verb}"
         )
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
+    }
+
+    private suspend fun emitError(profileId: Int, message: String) {
+        val ev = AgentEvent(
+            profileId = profileId,
+            ts = System.currentTimeMillis(),
+            kind = "sys",
+            text = message
+        )
+        _events.emit(ev)
+        eventRepository.recordEvent(EventEntity(profileId = profileId, ts = ev.ts, kind = ev.kind, text = ev.text))
     }
 
     override suspend fun sendInstruction(targets: List<Int>, text: String, runAt: Long?) {
