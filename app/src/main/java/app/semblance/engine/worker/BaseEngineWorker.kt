@@ -88,7 +88,7 @@ abstract class BaseEngineWorker : Service() {
                             mediaPlaybackRequiresUserGesture = false
                             cacheMode = WebSettings.LOAD_DEFAULT
                         }
-                        
+
                         val userAgent = profileData.getString("user_agent")
                         if (!userAgent.isNullOrBlank()) {
                             settings.userAgentString = userAgent
@@ -121,7 +121,7 @@ abstract class BaseEngineWorker : Service() {
                                     val uri = Uri.parse(currentUrl)
                                     val host = uri.host
                                     if (!host.isNullOrBlank()) { broadcastDomain(host) }
-                                } catch (e: Exception) {}
+                                } catch (_: Exception) {}
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
@@ -246,7 +246,7 @@ abstract class BaseEngineWorker : Service() {
         val count = callbacks.beginBroadcast()
         try {
             for (i in 0 until count) {
-                try { action(callbacks.getBroadcastItem(i)) } catch (e: RemoteException) {}
+                try { action(callbacks.getBroadcastItem(i)) } catch (_: RemoteException) {}
             }
         } finally { callbacks.finishBroadcast() }
     }
