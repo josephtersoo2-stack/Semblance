@@ -1,9 +1,10 @@
 # Phase P1b: WebView Hardening, Fullscreen Support & Minimize/Audio Semantics
 
 ## 1. Overview & Verification Summary
-- **Target**: Phase P1b (WebView Hardening, Fullscreen Video, Mute & Visibility Semantics).
-- **Status**: **COMPLETE & VERIFIED**.
-- **Unit Tests**: Passed (`testDebugUnitTest` executed 32 tasks successfully).
+- **Target**: Phase P1b (WebView Hardening, Fullscreen Video, Mute & Visibility Semantics, IPC Layer Synchronization).
+- **Status**: **COMPLETE, REPAIRED & VERIFIED**.
+- **AIDL Generation**: Clean rebuild via `./gradlew clean` confirmed exact stub generation without `AbstractMethodError`.
+- **Unit Tests**: Passed (`testDebugUnitTest` executed 51 tasks successfully).
 - **Compilation & Packaging**:
   - `compileDebugAidl` & `compileReleaseAidl` succeeded.
   - `assembleDebug` & `assembleRelease` succeeded.
@@ -32,6 +33,7 @@ if (!userAgent.isNullOrBlank()) {
     settings.userAgentString = userAgent
 }
 
+val currentWv = this
 CookieManager.getInstance().apply {
     setAcceptCookie(true)
     setAcceptThirdPartyCookies(currentWv, true) // Required for Google Auth, YouTube, OAuth
@@ -44,7 +46,29 @@ WebView.setWebContentsDebuggingEnabled(false)    // Stealth: Disables DevTools i
 ## 3. Fullscreen HTML5 Video Support (`WebChromeClient`)
 To support full-fidelity video rendering (e.g. YouTube HTML5 player requesting fullscreen), a `WebChromeClient` was implemented with custom view interception:
 
-- Intercepts `onShowCustomView(view, callback)` and `onHideCustomView()`.
+```kotlin
+webChromeClient = object : WebChromeClient() {
+    private var customView: View? = null
+    private var customViewCallback: CustomViewCallback? = null
+
+    override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+        if (customView != null) {
+            callback?.onCustomViewHidden()
+            return
+        }
+        customView = view
+        customViewCallback = callback
+        broadcastCustomView(true)
+    }
+
+    override fun onHideCustomView() {
+        customViewCallback?.onCustomViewHidden()
+        customView = null
+        broadcastCustomView(false)
+    }
+}
+```
+
 - Dispatches AIDL callback `onCustomViewChanged(boolean isShowing)` across Binder to the main UI process.
 - The UI layer (`MaximizedViewModel` and `MaximizedScreen`) tracks this state to display fullscreen playback indicators and seamless overlay rendering.
 
@@ -99,4 +123,4 @@ interface IEngineWorker {
 
 ## 6. Verification
 - **Automated Tests**: Added tests in `RealEngineTest.kt` verifying `maximize`, `minimize`, and `simulateAppSwitch` event dispatch and repository recording.
-- **Gradle Build**: Ran and verified `./gradlew.bat testDebugUnitTest assembleRelease assembleDebug`.
+- **Gradle Clean & Rebuild**: Ran `./gradlew clean` followed by `./gradlew testDebugUnitTest assembleRelease assembleDebug` (All passed).
