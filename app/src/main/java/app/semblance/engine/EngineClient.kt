@@ -19,4 +19,6 @@ interface EngineClient {
     suspend fun action(id: Int, action: ActionJson)
     suspend fun sendInstruction(targets: List<Int>, text: String, runAt: Long?)
     suspend fun runQa(id: Int)
+    suspend fun createProfileFromWizard(profile: app.semblance.data.local.entity.ProfileEntity)
+    suspend fun deleteProfile(id: Int)
 }

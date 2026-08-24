@@ -64,4 +64,18 @@ sealed class ActionJson {
     @Serializable
     @SerialName("minimize")
     data object Minimize : ActionJson()
+
+    val verb: String
+        get() = when (this) {
+            is Tap -> "tap"
+            is Swipe -> "swipe"
+            is TypeText -> "type_text"
+            is Key -> "key"
+            is Wait -> "wait"
+            is Navigate -> "navigate"
+            is Back -> "back"
+            is Volume -> "volume"
+            is Maximize -> "maximize"
+            is Minimize -> "minimize"
+        }
 }

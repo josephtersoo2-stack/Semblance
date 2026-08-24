@@ -20,6 +20,39 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".engine.worker.EngineWorker1"
+            android:exported="false"
+            android:process=":worker1" />
+        <service
+            android:name=".engine.worker.EngineWorker2"
+            android:exported="false"
+            android:process=":worker2" />
+        <service
+            android:name=".engine.worker.EngineWorker3"
+            android:exported="false"
+            android:process=":worker3" />
+        <service
+            android:name=".engine.worker.EngineWorker4"
+            android:exported="false"
+            android:process=":worker4" />
+        <service
+            android:name=".engine.worker.EngineWorker5"
+            android:exported="false"
+            android:process=":worker5" />
+        <service
+            android:name=".engine.worker.EngineWorker6"
+            android:exported="false"
+            android:process=":worker6" />
+        <service
+            android:name=".engine.worker.EngineWorker7"
+            android:exported="false"
+            android:process=":worker7" />
+        <service
+            android:name=".engine.worker.EngineWorker8"
+            android:exported="false"
+            android:process=":worker8" />
     </application>
 
 </manifest>

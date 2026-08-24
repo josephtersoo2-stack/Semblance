@@ -75,7 +75,7 @@ class FleetViewModel @Inject constructor(
 
     fun deleteProfile(id: Int) {
         viewModelScope.launch {
-            (engineClient as? MockEngine)?.deleteProfile(id)
+            engineClient.deleteProfile(id)
         }
     }
 }

@@ -3,7 +3,7 @@ package app.semblance.di
 import app.semblance.data.datastore.SettingsDataStore
 import app.semblance.data.datastore.SettingsDataStoreImpl
 import app.semblance.engine.EngineClient
-import app.semblance.engine.mock.MockEngine
+import app.semblance.engine.real.RealEngine
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -17,7 +17,7 @@ abstract class EngineModule {
     @Binds
     @Singleton
     abstract fun bindEngineClient(
-        mockEngine: MockEngine
+        realEngine: RealEngine
     ): EngineClient
 
     @Binds

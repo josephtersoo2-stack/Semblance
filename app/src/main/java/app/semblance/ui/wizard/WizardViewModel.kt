@@ -277,7 +277,7 @@ class WizardViewModel @Inject constructor(
                 warmth = 0
             )
 
-            (engineClient as? MockEngine)?.createProfileFromWizard(entity)
+            engineClient.createProfileFromWizard(entity)
             onSuccess()
         }
     }

@@ -549,7 +549,7 @@ class MockEngine @Inject constructor(
         }
     }
 
-    suspend fun createProfileFromWizard(profile: ProfileEntity) {
+    override suspend fun createProfileFromWizard(profile: ProfileEntity) {
         val warmupProfile = profile.copy(
             phase = "WARMUP",
             warmth = 0,
@@ -566,7 +566,7 @@ class MockEngine @Inject constructor(
         eventRepository.recordEvent(EventEntity(profileId = warmupProfile.id, ts = event.ts, kind = "sys", text = event.text))
     }
 
-    suspend fun deleteProfile(id: Int) {
+    override suspend fun deleteProfile(id: Int) {
         liveProfileIds.value = liveProfileIds.value - id
         profileRepository.deleteProfile(id)
     }
