@@ -11,8 +11,12 @@ interface EngineClient {
     fun profileFlow(id: Int): Flow<ProfileUiState>
     val thumbs: Flow<ThumbFrame>
     val events: Flow<AgentEvent>
+    val customViewEvents: Flow<Pair<Int, Boolean>>
     suspend fun open(id: Int)
     suspend fun close(id: Int, save: Boolean = true)
+    suspend fun maximize(id: Int)
+    suspend fun minimize(id: Int)
+    suspend fun simulateAppSwitch(id: Int, durationMs: Long)
     suspend fun wakeNow(id: Int)
     suspend fun sleepNow(id: Int)
     suspend fun snapshot(id: Int): String

@@ -8,6 +8,9 @@ interface IEngineWorker {
     void loadUrl(String url);
     void requestThumbnail();
     void executeAction(String actionJson);
+    void maximize();
+    void minimize();
+    void simulateAppSwitch(long durationMs);
     void registerCallback(IEngineCallback cb);
     void unregisterCallback(IEngineCallback cb);
 }

@@ -68,6 +68,9 @@ class RealEngine @Inject constructor(
     private val _events = MutableSharedFlow<AgentEvent>(replay = 20, extraBufferCapacity = 128)
     override val events: Flow<AgentEvent> = _events.asSharedFlow()
 
+    private val _customViewEvents = MutableSharedFlow<Pair<Int, Boolean>>(replay = 1, extraBufferCapacity = 64)
+    override val customViewEvents: Flow<Pair<Int, Boolean>> = _customViewEvents.asSharedFlow()
+
     // Active live profile IDs currently bound to worker processes
     private val liveProfileIds = MutableStateFlow<Set<Int>>(emptySet())
 
@@ -255,6 +258,20 @@ class RealEngine @Inject constructor(
                             _thumbs.tryEmit(ThumbFrame(profileId, jpegData, System.currentTimeMillis()))
                         }
                     }
+
+                    override fun onCustomViewChanged(isShowing: Boolean) {
+                        _customViewEvents.tryEmit(profile.id to isShowing)
+                        val ev = AgentEvent(
+                            profileId = profile.id,
+                            ts = System.currentTimeMillis(),
+                            kind = "nav",
+                            text = if (isShowing) "Entered fullscreen video mode" else "Exited fullscreen video mode"
+                        )
+                        scope.launch {
+                            _events.emit(ev)
+                            eventRepository.recordEvent(EventEntity(profileId = profile.id, ts = ev.ts, kind = ev.kind, text = ev.text))
+                        }
+                    }
                 }
 
                 try {
@@ -322,6 +339,33 @@ class RealEngine @Inject constructor(
         }
 
         val ev = AgentEvent(id, System.currentTimeMillis(), "sys", "Profile closed (saveState=$save)")
+        _events.emit(ev)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
+    }
+
+    override suspend fun maximize(id: Int) {
+        if (!workers.containsKey(id)) {
+            open(id)
+        }
+        workers[id]?.maximize()
+        val ev = AgentEvent(id, System.currentTimeMillis(), "motor", "Maximized profile surface (unmuted audio)")
+        _events.emit(ev)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
+    }
+
+    override suspend fun minimize(id: Int) {
+        workers[id]?.minimize()
+        val ev = AgentEvent(id, System.currentTimeMillis(), "sys", "Minimized profile to background (muted audio)")
+        _events.emit(ev)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
+    }
+
+    override suspend fun simulateAppSwitch(id: Int, durationMs: Long) {
+        if (!workers.containsKey(id)) {
+            open(id)
+        }
+        workers[id]?.simulateAppSwitch(durationMs)
+        val ev = AgentEvent(id, System.currentTimeMillis(), "sys", "Simulating app-switch (visibilitychange=hidden for ${durationMs}ms)")
         _events.emit(ev)
         eventRepository.recordEvent(EventEntity(profileId = id, ts = ev.ts, kind = ev.kind, text = ev.text))
     }

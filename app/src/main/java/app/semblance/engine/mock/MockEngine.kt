@@ -54,6 +54,9 @@ class MockEngine @Inject constructor(
     private val _events = MutableSharedFlow<AgentEvent>(replay = 20, extraBufferCapacity = 128)
     override val events: Flow<AgentEvent> = _events.asSharedFlow()
 
+    private val _customViewEvents = MutableSharedFlow<Pair<Int, Boolean>>(replay = 1, extraBufferCapacity = 64)
+    override val customViewEvents: Flow<Pair<Int, Boolean>> = _customViewEvents.asSharedFlow()
+
     // Live active profile IDs currently open in the worker pool
     private val liveProfileIds = MutableStateFlow<Set<Int>>(setOf(1, 2, 3, 5, 8))
 
@@ -412,6 +415,25 @@ class MockEngine @Inject constructor(
             profileRepository.updateProfile(profile.copy(status = "SLEEPING"))
             emitStatusEvent(id, profile.alias, "SLEEPING")
         }
+    }
+
+    override suspend fun maximize(id: Int) {
+        val profile = profileRepository.getProfileSync(id)
+        val event = AgentEvent(profileId = id, ts = System.currentTimeMillis(), kind = "motor", text = "Maximized profile surface (unmuted audio)")
+        _events.emit(event)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = event.ts, kind = "motor", text = event.text))
+    }
+
+    override suspend fun minimize(id: Int) {
+        val event = AgentEvent(profileId = id, ts = System.currentTimeMillis(), kind = "sys", text = "Minimized profile to background (muted audio)")
+        _events.emit(event)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = event.ts, kind = "sys", text = event.text))
+    }
+
+    override suspend fun simulateAppSwitch(id: Int, durationMs: Long) {
+        val event = AgentEvent(profileId = id, ts = System.currentTimeMillis(), kind = "sys", text = "Simulating app-switch (visibilitychange=hidden for ${durationMs}ms)")
+        _events.emit(event)
+        eventRepository.recordEvent(EventEntity(profileId = id, ts = event.ts, kind = "sys", text = event.text))
     }
 
     override suspend fun wakeNow(id: Int) {

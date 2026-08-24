@@ -184,4 +184,33 @@ class RealEngineTest {
         val afterDelete = profileRepository.getProfileSync(101)
         assertEquals(null, afterDelete)
     }
+
+    @Test
+    fun testRealEngineMaximizeMinimizeAndSimulateAppSwitch() = runTest {
+        val engine = RealEngine(
+            context = mockContext,
+            profileRepository = profileRepository,
+            taskRepository = taskRepository,
+            eventRepository = eventRepository,
+            profileSeeder = profileSeeder
+        )
+
+        for (i in 1..30) {
+            if (profileRepository.getCount() == 8) break
+            Thread.sleep(50)
+        }
+
+        // Test maximize, minimize, and simulateAppSwitch event emissions
+        engine.maximize(1)
+        var recentEvents = eventRepository.getRecentEvents(5).first()
+        assertTrue(recentEvents.any { it.kind == "motor" && it.text.contains("Maximized") })
+
+        engine.minimize(1)
+        recentEvents = eventRepository.getRecentEvents(5).first()
+        assertTrue(recentEvents.any { it.kind == "sys" && it.text.contains("Minimized") })
+
+        engine.simulateAppSwitch(1, 2000L)
+        recentEvents = eventRepository.getRecentEvents(5).first()
+        assertTrue(recentEvents.any { it.kind == "sys" && it.text.contains("Simulating app-switch") })
+    }
 }

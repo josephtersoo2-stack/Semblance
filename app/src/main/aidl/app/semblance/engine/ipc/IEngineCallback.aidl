@@ -5,4 +5,5 @@ interface IEngineCallback {
     void onDomainVisited(int profileId, String host);
     void onError(int profileId, String message);
     void onThumbnailReady(int profileId, in byte[] jpegData);
+    void onCustomViewChanged(boolean isShowing);
 }

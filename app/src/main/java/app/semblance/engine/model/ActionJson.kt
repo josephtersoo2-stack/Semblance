@@ -65,6 +65,12 @@ sealed class ActionJson {
     @SerialName("minimize")
     data object Minimize : ActionJson()
 
+    @Serializable
+    @SerialName("simulate_app_switch")
+    data class SimulateAppSwitch(
+        val durationMs: Long = 3000L
+    ) : ActionJson()
+
     val verb: String
         get() = when (this) {
             is Tap -> "tap"
@@ -77,5 +83,6 @@ sealed class ActionJson {
             is Volume -> "volume"
             is Maximize -> "maximize"
             is Minimize -> "minimize"
+            is SimulateAppSwitch -> "simulate_app_switch"
         }
 }

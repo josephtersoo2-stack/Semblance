@@ -13,8 +13,12 @@ import android.os.Looper
 import android.os.Process
 import android.os.RemoteCallbackList
 import android.os.RemoteException
+import android.view.View
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import app.semblance.engine.ipc.IEngineCallback
@@ -75,15 +79,50 @@ abstract class BaseEngineWorker : Service() {
 
                 if (webView == null) {
                     webView = WebView(this@BaseEngineWorker).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.databaseEnabled = true
-                        settings.useWideViewPort = true
-                        settings.loadWithOverviewMode = true
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            useWideViewPort = true               // CRITICAL for mobile layouts
+                            loadWithOverviewMode = true
+                            setSupportZoom(false)
+                            builtInZoomControls = false
+                            mediaPlaybackRequiresUserGesture = false 
+                            cacheMode = WebSettings.LOAD_DEFAULT // Real cache behavior
+                        }
 
                         val userAgent = profileData.getString("user_agent")
                         if (!userAgent.isNullOrBlank()) {
                             settings.userAgentString = userAgent
+                        }
+
+                        val currentWv = this
+                        CookieManager.getInstance().apply {
+                            setAcceptCookie(true)
+                            setAcceptThirdPartyCookies(currentWv, true) // Required for Google Auth & YouTube
+                        }
+                        WebView.setWebContentsDebuggingEnabled(false)    // Stealth: hide devtools
+
+                        webChromeClient = object : WebChromeClient() {
+                            private var customView: View? = null
+                            private var customViewCallback: CustomViewCallback? = null
+
+                            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                                if (customView != null) {
+                                    callback?.onCustomViewHidden()
+                                    return
+                                }
+                                customView = view
+                                customViewCallback = callback
+                                // Notify Main Process UI to show a fullscreen overlay
+                                broadcastCustomView(true)
+                            }
+
+                            override fun onHideCustomView() {
+                                customViewCallback?.onCustomViewHidden()
+                                customView = null
+                                broadcastCustomView(false)
+                            }
                         }
 
                         webViewClient = object : WebViewClient() {
@@ -181,6 +220,39 @@ abstract class BaseEngineWorker : Service() {
             }
         }
 
+        override fun maximize() {
+            mainHandler.post {
+                // Unmute all media elements in this worker's WebView
+                webView?.evaluateJavascript(
+                    "document.querySelectorAll('video, audio').forEach(el => el.muted = false)", null
+                )
+            }
+        }
+
+        override fun minimize() {
+            mainHandler.post {
+                // Mute all media elements so 8 profiles don't scream at the operator
+                webView?.evaluateJavascript(
+                    "document.querySelectorAll('video, audio').forEach(el => el.muted = true)", null
+                )
+            }
+        }
+
+        override fun simulateAppSwitch(durationMs: Long) {
+            mainHandler.post {
+                val wv = webView ?: return@post
+                // onPause() triggers Chromium's internal visibilitychange event to 'hidden'
+                // YouTube will automatically pause the video.
+                wv.onPause()
+
+                mainHandler.postDelayed({
+                    // onResume() restores visibility to 'visible', video remains paused
+                    // until the agent taps play (human behavior).
+                    wv.onResume()
+                }, durationMs)
+            }
+        }
+
         override fun executeAction(actionJson: String) {
             mainHandler.post {
                 try {
@@ -202,6 +274,22 @@ abstract class BaseEngineWorker : Service() {
                         }
                         is ActionJson.Wait -> {
                             broadcastState("IDLE", webView?.url ?: "")
+                        }
+                        is ActionJson.Maximize -> {
+                            maximize()
+                        }
+                        is ActionJson.Minimize -> {
+                            minimize()
+                        }
+                        is ActionJson.SimulateAppSwitch -> {
+                            simulateAppSwitch(action.durationMs)
+                        }
+                        is ActionJson.Volume -> {
+                            if (action.dir.lowercase() == "mute") {
+                                minimize()
+                            } else {
+                                maximize()
+                            }
                         }
                         else -> {
                             // Supported in P2 Motor phase
@@ -251,6 +339,12 @@ abstract class BaseEngineWorker : Service() {
         val pid = currentProfileId
         broadcastCallbacks { cb ->
             cb.onThumbnailReady(pid, jpegData)
+        }
+    }
+
+    private fun broadcastCustomView(isShowing: Boolean) {
+        broadcastCallbacks { cb ->
+            cb.onCustomViewChanged(isShowing)
         }
     }
 

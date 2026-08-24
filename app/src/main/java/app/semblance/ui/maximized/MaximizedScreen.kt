@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Comment
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Refresh
@@ -85,6 +86,8 @@ fun MaximizedScreen(
     val events by viewModel.events.collectAsState()
     val thumbJpeg by viewModel.latestThumb.collectAsState()
     val snapshotResult by viewModel.snapshotResult.collectAsState()
+    val isCustomViewShowing by viewModel.isCustomViewShowing.collectAsState()
+    val isMuted by viewModel.isMuted.collectAsState()
 
     var showCommentDialog by remember { mutableStateOf(false) }
     var commentText by remember { mutableStateOf("") }
@@ -109,7 +112,13 @@ fun MaximizedScreen(
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onNavigateBack, modifier = Modifier.size(32.dp)) {
+                        IconButton(
+                            onClick = {
+                                viewModel.minimize()
+                                onNavigateBack()
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
                         }
                         Spacer(modifier = Modifier.width(4.dp))
@@ -149,7 +158,12 @@ fun MaximizedScreen(
                             onClick = { viewModel.executeQuickAction("volume") },
                             modifier = Modifier.size(32.dp)
                         ) {
-                            Icon(Icons.Default.VolumeUp, contentDescription = "Volume", tint = AccentCyan, modifier = Modifier.size(18.dp))
+                            Icon(
+                                Icons.Default.VolumeUp,
+                                contentDescription = "Volume",
+                                tint = if (isMuted) TextMuted else AccentCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                         IconButton(
                             onClick = { viewModel.executeQuickAction("navigate", profile?.currentHost ?: "https://youtube.com") },
@@ -246,6 +260,38 @@ fun MaximizedScreen(
                                 text = "PERCEPTION: 38 nodes | MOTOR: armed | SUFFIX: p${profile?.id ?: 1}",
                                 style = Typography.labelSmall.copy(color = AccentGreen, fontSize = 8.sp)
                             )
+                        }
+
+                        // Fullscreen CustomView overlay indicator
+                        if (isCustomViewShowing) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.85f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Fullscreen,
+                                        contentDescription = "Fullscreen Video Active",
+                                        tint = AccentCyan,
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "HTML5 FULLSCREEN ACTIVE",
+                                        style = Typography.titleMedium.copy(color = TextPrimary, fontWeight = FontWeight.Bold)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "WebChromeClient onShowCustomView rendered in worker",
+                                        style = Typography.bodySmall.copy(color = TextSecondary, fontSize = 10.sp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
