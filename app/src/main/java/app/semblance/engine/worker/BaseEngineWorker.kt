@@ -138,6 +138,15 @@ abstract class BaseEngineWorker : Service() {
                                 }
                             }
                         }
+
+                        // Ensure headless WebView in Service has realistic mobile dimensions for Chromium layout
+                        val defaultWidth = 1080
+                        val defaultHeight = 2400
+                        measure(
+                            View.MeasureSpec.makeMeasureSpec(defaultWidth, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(defaultHeight, View.MeasureSpec.EXACTLY)
+                        )
+                        layout(0, 0, defaultWidth, defaultHeight)
                     }
                 }
 
@@ -166,16 +175,23 @@ abstract class BaseEngineWorker : Service() {
         override fun requestThumbnail() {
             mainHandler.post {
                 val wv = webView ?: return@post
-                val wvWidth = wv.width.coerceAtLeast(1)
-                val wvHeight = wv.height.coerceAtLeast(1)
-                val targetWidth = 300
-                val targetHeight = (300f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(600)
+                val wvWidth = wv.width.takeIf { it > 100 } ?: 1080
+                val wvHeight = wv.height.takeIf { it > 100 } ?: 2400
+                if (wv.width <= 0 || wv.height <= 0) {
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(wvWidth, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(wvHeight, View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, wvWidth, wvHeight)
+                }
+                val targetWidth = 360
+                val targetHeight = (360f * wvHeight / wvWidth).toInt().coerceAtLeast(1).coerceAtMost(800)
                 val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
                 val canvas = Canvas(bitmap)
                 canvas.scale(targetWidth.toFloat() / wvWidth.toFloat(), targetHeight.toFloat() / wvHeight.toFloat())
                 wv.draw(canvas)
                 val stream = ByteArrayOutputStream()
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 50, stream)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
                 bitmap.recycle()
                 broadcastThumbnail(stream.toByteArray())
             }
